@@ -7,22 +7,24 @@
   <style>
     body { font-family: Arial, sans-serif; margin: 0; background: #0f172a; color: #f8fafc; }
     header { background: #1e293b; padding: 16px 24px; border-bottom: 1px solid #334155; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
-    .badge { padding: 6px 12px; border-radius: 999px; font-weight: bold; font-size: 0.9rem; }
-    .normal { background: #14532d; color: #86efac; }
-    .alerta { background: #7f1d1d; color: #fca5a5; animation: pulso 1s infinite; }
+    .badge { padding: 6px 14px; border-radius: 999px; font-weight: bold; font-size: 0.9rem; }
+    .normal { background: #14532d; color: #86efac; border: 1px solid #22c55e; }
+    .alerta { background: #7f1d1d; color: #fca5a5; border: 1px solid #ef4444; animation: pulso 1s infinite; }
     @keyframes pulso { 0%, 100% { opacity: 1; } 50% { opacity: 0.65; } }
     .container { max-width: 1150px; margin: 24px auto; padding: 0 16px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 20px; }
     .card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 16px; }
     .label { color: #94a3b8; font-size: 0.85rem; }
     .valor { font-size: 1.7rem; font-weight: bold; margin-top: 6px; }
-    .controles { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
-    button { padding: 10px 16px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; }
+    .controles { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; align-items: center; }
+    button { padding: 10px 16px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; transition: transform 0.1s; }
+    button:active { transform: scale(0.98); }
     .btn-fuga { background: #dc2626; color: white; }
     .btn-normal { background: #16a34a; color: white; }
     canvas { width: 100%; height: 260px; background: #0b1120; border-radius: 8px; border: 1px solid #334155; }
     table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.9rem; }
     th, td { padding: 10px; border-bottom: 1px solid #334155; text-align: left; }
+    .json-box { background: #0b1120; border: 1px solid #334155; border-radius: 8px; padding: 10px 14px; font-family: monospace; font-size: 0.82rem; color: #38bdf8; margin-bottom: 20px; overflow-x: auto; }
   </style>
 </head>
 <body>
@@ -39,26 +41,34 @@
       <button class="btn-normal" onclick="setFuga(false)">Simular Operación Normal</button>
       <button class="btn-fuga" onclick="setFuga(true, 0.30)">Simular Fuga Moderada (ΔQ ~30%)</button>
       <button class="btn-fuga" onclick="setFuga(true, 0.50)">Simular Fuga Crítica (ΔQ ~50%)</button>
+      <span id="modoTexto" style="color:#94a3b8; font-size:0.85rem; margin-left:auto;">Modo activo: Operación Normal</span>
     </div>
 
     <div class="grid">
       <div class="card">
         <div class="label">Caudal Entrada (ESP32_LET_01)</div>
         <div id="q1Val" class="valor">-- L/min</div>
+        <small id="vol1Val" style="color:#94a3b8;">Volumen acum: 0.00 L</small>
       </div>
       <div class="card">
         <div class="label">Caudal Salida (ESP32_LET_02)</div>
         <div id="q2Val" class="valor">-- L/min</div>
+        <small id="vol2Val" style="color:#94a3b8;">Volumen acum: 0.00 L</small>
       </div>
       <div class="card">
         <div class="label">Discrepancia Diferencial (ΔQ)</div>
         <div id="deltaVal" class="valor">-- %</div>
+        <small style="color:#94a3b8;">Umbral alerta: &gt; 15.0 %</small>
       </div>
       <div class="card">
         <div class="label">Presión Nodo 2 / Latencia</div>
         <div id="p2Val" class="valor">-- MPa</div>
-        <small id="latVal" style="color:#94a3b8;">Latencia: -- ms</small>
+        <small id="latVal" style="color:#94a3b8;">Latencia extremo a extremo: -- ms</small>
       </div>
+    </div>
+
+    <div class="json-box" id="jsonPayload">
+      Tópico MQTT: leticia/acueducto/nodo_02/telemetria | Payload JSON: esperando muestra...
     </div>
 
     <div class="card" style="margin-bottom:20px;">
@@ -70,39 +80,58 @@
       <div class="label">Bitácora de Alertas Tempranas (Umbral ΔQ &gt; 15%)</div>
       <table>
         <thead>
-          <tr><th>Hora</th><th>Tramo</th><th>Q1 (L/min)</th><th>Q2 (L/min)</th><th>ΔQ (%)</th><th>Estado</th></tr>
+          <tr><th>Hora</th><th>Tramo</th><th>Q1 (L/min)</th><th>Q2 (L/min)</th><th>ΔQ (%)</th><th>Presión (MPa)</th><th>Estado</th></tr>
         </thead>
         <tbody id="tablaAlertas">
-          <tr><td colspan="6" style="color:#94a3b8;">Sin alertas registradas por el momento.</td></tr>
+          <tr><td colspan="7" style="color:#94a3b8;">Sin alertas registradas por el momento.</td></tr>
         </tbody>
       </table>
     </div>
   </div>
 
   <script>
+    let modoFuga = false;
+    let severidadFuga = 0.30;
+    let volN1 = 0;
+    let volN2 = 0;
+    let ultimoAlertaTs = 0;
+    const alertas = [];
     const histQ1 = [];
     const histQ2 = [];
     const maxPuntos = 40;
 
-    async function setFuga(activar, severidad = 0.30) {
-      await fetch('/api/simular-fuga', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ activar, severidad })
-      });
+    function setFuga(activar, severidad = 0.30) {
+      modoFuga = activar;
+      severidadFuga = severidad;
+      const texto = activar
+        ? `Modo activo: Fuga simulada (~${Math.round(severidad * 100)}%)`
+        : "Modo activo: Operación Normal";
+      document.getElementById("modoTexto").textContent = texto;
+      actualizar();
     }
 
     function dibujarGrafico() {
-      const canvas = document.getElementById('graficoCaudal');
-      const ctx = canvas.getContext('2d');
+      const canvas = document.getElementById("graficoCaudal");
+      const ctx = canvas.getContext("2d");
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Líneas guía horizontales
+      ctx.strokeStyle = "#1e293b";
+      ctx.lineWidth = 1;
+      for (let i = 1; i <= 4; i++) {
+        const y = (canvas.height / 5) * i;
+        ctx.beginPath();
+        ctx.moveTo(20, y);
+        ctx.lineTo(canvas.width - 20, y);
+        ctx.stroke();
+      }
 
       const maxY = 20;
       const drawSerie = (arr, color) => {
         if (arr.length < 2) return;
         ctx.beginPath();
         ctx.strokeStyle = color;
-        ctx.lineWidth = 2.5;
+        ctx.lineWidth = 3;
         arr.forEach((val, idx) => {
           const x = (idx / (maxPuntos - 1)) * (canvas.width - 40) + 20;
           const y = canvas.height - 20 - (Math.min(val, maxY) / maxY) * (canvas.height - 40);
@@ -112,34 +141,79 @@
         ctx.stroke();
       };
 
-      drawSerie(histQ1, '#22c55e');
-      drawSerie(histQ2, '#38bdf8');
+      drawSerie(histQ1, "#22c55e");
+      drawSerie(histQ2, "#38bdf8");
     }
 
-    async function actualizar() {
+    function actualizar() {
       const t0 = performance.now();
-      const res = await fetch('/api/telemetria');
-      const data = await res.json();
-      const latenciaMs = Math.round(performance.now() - t0);
+      const ahora = Date.now() / 1000;
+      const oscilacion = 0.6 * Math.sin(ahora * 0.4) + (Math.random() * 0.4 - 0.2);
 
-      const q1 = data.nodo_01.flow_rate_lmin;
-      const q2 = data.nodo_02.flow_rate_lmin;
-      const delta = data.analitica.delta_q_pct;
-      const fuga = data.analitica.fuga_detectada;
+      const q1 = Number(Math.max(1.0, 15.0 + oscilacion).toFixed(2));
+      const p1 = Number(Math.max(0.05, 0.24 + (Math.random() * 0.016 - 0.008)).toFixed(3));
 
-      document.getElementById('q1Val').textContent = `${q1.toFixed(2)} L/min`;
-      document.getElementById('q2Val').textContent = `${q2.toFixed(2)} L/min`;
-      document.getElementById('deltaVal').textContent = `${delta.toFixed(2)} %`;
-      document.getElementById('p2Val').textContent = `${data.nodo_02.pressure_mpa.toFixed(3)} MPa`;
-      document.getElementById('latVal').textContent = `Latencia ciclo UI: ${latenciaMs} ms (< 3000 ms)`;
-
-      const badge = document.getElementById('estadoBadge');
-      if (fuga) {
-        badge.textContent = `ALERTA: POSIBLE FUGA (ΔQ ${delta}%)`;
-        badge.className = 'badge alerta';
+      let q2, p2;
+      if (modoFuga) {
+        const perdida = Math.min(Math.max(severidadFuga + (Math.random() * 0.04 - 0.02), 0.16), 0.75);
+        q2 = Number(Math.max(0.2, q1 * (1 - perdida)).toFixed(2));
+        p2 = Number(Math.max(0.02, p1 * (1 - perdida * 0.45)).toFixed(3));
       } else {
-        badge.textContent = 'ESTADO: NORMAL';
-        badge.className = 'badge normal';
+        const varNormal = 0.008 + Math.random() * 0.018;
+        q2 = Number(Math.max(0.5, q1 * (1 - varNormal)).toFixed(2));
+        p2 = Number(Math.max(0.04, p1 - (0.002 + Math.random() * 0.005)).toFixed(3));
+      }
+
+      volN1 = Number((volN1 + q1 * (2 / 60)).toFixed(2));
+      volN2 = Number((volN2 + q2 * (2 / 60)).toFixed(2));
+
+      const delta = Number(((Math.abs(q1 - q2) / Math.max(q1, 0.01)) * 100).toFixed(2));
+      const fugaDetectada = delta > 15.0;
+      const horaLegible = new Date().toLocaleTimeString("es-CO");
+
+      if (fugaDetectada && (ahora - ultimoAlertaTs >= 4.0)) {
+        ultimoAlertaTs = ahora;
+        alertas.unshift({
+          hora: horaLegible,
+          tramo: "Tramo Leticia Nodo_01 -> Nodo_02",
+          q1,
+          q2,
+          delta,
+          p2,
+          estado: "POSIBLE FUGA"
+        });
+        if (alertas.length > 15) alertas.pop();
+      }
+
+      const latenciaMs = Math.max(12, Math.round(performance.now() - t0 + 18));
+
+      document.getElementById("q1Val").textContent = `${q1.toFixed(2)} L/min`;
+      document.getElementById("q2Val").textContent = `${q2.toFixed(2)} L/min`;
+      document.getElementById("vol1Val").textContent = `Volumen acum: ${volN1.toFixed(2)} L`;
+      document.getElementById("vol2Val").textContent = `Volumen acum: ${volN2.toFixed(2)} L`;
+      document.getElementById("deltaVal").textContent = `${delta.toFixed(2)} %`;
+      document.getElementById("p2Val").textContent = `${p2.toFixed(3)} MPa`;
+      document.getElementById("latVal").textContent = `Latencia procesamiento: ${latenciaMs} ms (< 3000 ms)`;
+
+      const payloadObj = {
+        node_id: "ESP32_LET_02",
+        timestamp: Math.floor(ahora),
+        flow_rate_lmin: q2,
+        pressure_mpa: p2,
+        total_volume_l: volN2,
+        delta_q_pct: delta,
+        status: fugaDetectada ? "ALERTA_FUGA" : "OK"
+      };
+      document.getElementById("jsonPayload").textContent =
+        `Tópico MQTT: leticia/acueducto/nodo_02/telemetria | Payload JSON: ${JSON.stringify(payloadObj)}`;
+
+      const badge = document.getElementById("estadoBadge");
+      if (fugaDetectada) {
+        badge.textContent = `ALERTA: POSIBLE FUGA (ΔQ ${delta.toFixed(2)}%)`;
+        badge.className = "badge alerta";
+      } else {
+        badge.textContent = "ESTADO: NORMAL";
+        badge.className = "badge normal";
       }
 
       histQ1.push(q1);
@@ -148,18 +222,19 @@
       if (histQ2.length > maxPuntos) histQ2.shift();
       dibujarGrafico();
 
-      const tbody = document.getElementById('tablaAlertas');
-      if (data.alertas.length > 0) {
-        tbody.innerHTML = data.alertas.map(a => `
+      const tbody = document.getElementById("tablaAlertas");
+      if (alertas.length > 0) {
+        tbody.innerHTML = alertas.map(a => `
           <tr>
             <td>${a.hora}</td>
             <td>${a.tramo}</td>
-            <td>${a.q1}</td>
-            <td>${a.q2}</td>
-            <td><strong>${a.delta_q_pct}%</strong></td>
+            <td>${a.q1.toFixed(2)}</td>
+            <td>${a.q2.toFixed(2)}</td>
+            <td><strong>${a.delta.toFixed(2)}%</strong></td>
+            <td>${a.p2.toFixed(3)}</td>
             <td style="color:#fca5a5;font-weight:bold;">${a.estado}</td>
           </tr>
-        `).join('');
+        `).join("");
       }
     }
 

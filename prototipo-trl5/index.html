@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Prototipo TRL 5 - Monitoreo Hídrico Leticia (IoT)</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; background: #0f172a; color: #f8fafc; }
+    header { background: #1e293b; padding: 16px 24px; border-bottom: 1px solid #334155; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
+    .badge { padding: 6px 12px; border-radius: 999px; font-weight: bold; font-size: 0.9rem; }
+    .normal { background: #14532d; color: #86efac; }
+    .alerta { background: #7f1d1d; color: #fca5a5; animation: pulso 1s infinite; }
+    @keyframes pulso { 0%, 100% { opacity: 1; } 50% { opacity: 0.65; } }
+    .container { max-width: 1150px; margin: 24px auto; padding: 0 16px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 20px; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 16px; }
+    .label { color: #94a3b8; font-size: 0.85rem; }
+    .valor { font-size: 1.7rem; font-weight: bold; margin-top: 6px; }
+    .controles { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+    button { padding: 10px 16px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; }
+    .btn-fuga { background: #dc2626; color: white; }
+    .btn-normal { background: #16a34a; color: white; }
+    canvas { width: 100%; height: 260px; background: #0b1120; border-radius: 8px; border: 1px solid #334155; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.9rem; }
+    th, td { padding: 10px; border-bottom: 1px solid #334155; text-align: left; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h2 style="margin:0;">Monitoreo Hídrico y Detección de Fugas – Leticia, Amazonas (TRL 5)</h2>
+      <small style="color:#94a3b8;">Red Comunitaria / Periurbana • Protocolo MQTT & Analítica Diferencial ΔQ</small>
+    </div>
+    <span id="estadoBadge" class="badge normal">ESTADO: NORMAL</span>
+  </header>
+
+  <div class="container">
+    <div class="controles">
+      <button class="btn-normal" onclick="setFuga(false)">Simular Operación Normal</button>
+      <button class="btn-fuga" onclick="setFuga(true, 0.30)">Simular Fuga Moderada (ΔQ ~30%)</button>
+      <button class="btn-fuga" onclick="setFuga(true, 0.50)">Simular Fuga Crítica (ΔQ ~50%)</button>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <div class="label">Caudal Entrada (ESP32_LET_01)</div>
+        <div id="q1Val" class="valor">-- L/min</div>
+      </div>
+      <div class="card">
+        <div class="label">Caudal Salida (ESP32_LET_02)</div>
+        <div id="q2Val" class="valor">-- L/min</div>
+      </div>
+      <div class="card">
+        <div class="label">Discrepancia Diferencial (ΔQ)</div>
+        <div id="deltaVal" class="valor">-- %</div>
+      </div>
+      <div class="card">
+        <div class="label">Presión Nodo 2 / Latencia</div>
+        <div id="p2Val" class="valor">-- MPa</div>
+        <small id="latVal" style="color:#94a3b8;">Latencia: -- ms</small>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:20px;">
+      <div class="label" style="margin-bottom:8px;">Tendencia de Caudal en Tiempo Real (Verde: Nodo 01 Entrada | Cian: Nodo 02 Salida)</div>
+      <canvas id="graficoCaudal" width="1050" height="260"></canvas>
+    </div>
+
+    <div class="card">
+      <div class="label">Bitácora de Alertas Tempranas (Umbral ΔQ &gt; 15%)</div>
+      <table>
+        <thead>
+          <tr><th>Hora</th><th>Tramo</th><th>Q1 (L/min)</th><th>Q2 (L/min)</th><th>ΔQ (%)</th><th>Estado</th></tr>
+        </thead>
+        <tbody id="tablaAlertas">
+          <tr><td colspan="6" style="color:#94a3b8;">Sin alertas registradas por el momento.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const histQ1 = [];
+    const histQ2 = [];
+    const maxPuntos = 40;
+
+    async function setFuga(activar, severidad = 0.30) {
+      await fetch('/api/simular-fuga', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ activar, severidad })
+      });
+    }
+
+    function dibujarGrafico() {
+      const canvas = document.getElementById('graficoCaudal');
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      const maxY = 20;
+      const drawSerie = (arr, color) => {
+        if (arr.length < 2) return;
+        ctx.beginPath();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2.5;
+        arr.forEach((val, idx) => {
+          const x = (idx / (maxPuntos - 1)) * (canvas.width - 40) + 20;
+          const y = canvas.height - 20 - (Math.min(val, maxY) / maxY) * (canvas.height - 40);
+          if (idx === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      };
+
+      drawSerie(histQ1, '#22c55e');
+      drawSerie(histQ2, '#38bdf8');
+    }
+
+    async function actualizar() {
+      const t0 = performance.now();
+      const res = await fetch('/api/telemetria');
+      const data = await res.json();
+      const latenciaMs = Math.round(performance.now() - t0);
+
+      const q1 = data.nodo_01.flow_rate_lmin;
+      const q2 = data.nodo_02.flow_rate_lmin;
+      const delta = data.analitica.delta_q_pct;
+      const fuga = data.analitica.fuga_detectada;
+
+      document.getElementById('q1Val').textContent = `${q1.toFixed(2)} L/min`;
+      document.getElementById('q2Val').textContent = `${q2.toFixed(2)} L/min`;
+      document.getElementById('deltaVal').textContent = `${delta.toFixed(2)} %`;
+      document.getElementById('p2Val').textContent = `${data.nodo_02.pressure_mpa.toFixed(3)} MPa`;
+      document.getElementById('latVal').textContent = `Latencia ciclo UI: ${latenciaMs} ms (< 3000 ms)`;
+
+      const badge = document.getElementById('estadoBadge');
+      if (fuga) {
+        badge.textContent = `ALERTA: POSIBLE FUGA (ΔQ ${delta}%)`;
+        badge.className = 'badge alerta';
+      } else {
+        badge.textContent = 'ESTADO: NORMAL';
+        badge.className = 'badge normal';
+      }
+
+      histQ1.push(q1);
+      histQ2.push(q2);
+      if (histQ1.length > maxPuntos) histQ1.shift();
+      if (histQ2.length > maxPuntos) histQ2.shift();
+      dibujarGrafico();
+
+      const tbody = document.getElementById('tablaAlertas');
+      if (data.alertas.length > 0) {
+        tbody.innerHTML = data.alertas.map(a => `
+          <tr>
+            <td>${a.hora}</td>
+            <td>${a.tramo}</td>
+            <td>${a.q1}</td>
+            <td>${a.q2}</td>
+            <td><strong>${a.delta_q_pct}%</strong></td>
+            <td style="color:#fca5a5;font-weight:bold;">${a.estado}</td>
+          </tr>
+        `).join('');
+      }
+    }
+
+    setInterval(actualizar, 2000);
+    actualizar();
+  </script>
+</body>
+</html>
